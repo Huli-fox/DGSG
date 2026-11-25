@@ -5,10 +5,11 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import tempfile
 import threading
 import time
 from pathlib import Path
-from typing import Iterable
+from typing import IO, Iterable
 
 VIDEO_EXTENSIONS: frozenset[str] = frozenset({
     ".mp4",
@@ -138,36 +139,53 @@ def extract_audio(
     ]
 
     creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
-    proc = subprocess.Popen(
-        cmd,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-        creationflags=creationflags,
-    )
 
-    try:
-        while proc.poll() is None:
-            if cancel_event and cancel_event.is_set():
-                proc.terminate()
-                try:
-                    proc.wait(timeout=3)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-                if output_path.exists():
+    # stderr goes to a temp file rather than a PIPE: a corrupted input can make
+    # FFmpeg emit hundreds of KB of errors, which would fill the pipe buffer and
+    # deadlock FFmpeg while we wait for it to exit.
+    with tempfile.TemporaryFile() as stderr_file:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=stderr_file,
+            creationflags=creationflags,
+        )
+
+        try:
+            while proc.poll() is None:
+                if cancel_event and cancel_event.is_set():
+                    _stop_process(proc)
                     output_path.unlink(missing_ok=True)
-                raise ExtractionCancelled("任务已取消")
-            time.sleep(0.1)
+                    raise ExtractionCancelled("任务已取消")
+                time.sleep(0.1)
+        finally:
+            # Never leave an orphaned FFmpeg behind on unexpected errors.
+            if proc.poll() is None:
+                _stop_process(proc)
 
-        stderr_bytes = proc.stderr.read() if proc.stderr else b""
         if proc.returncode != 0:
-            err_text = stderr_bytes.decode("utf-8", errors="replace").strip()
+            err_text = _read_tail(stderr_file).decode("utf-8", errors="replace").strip()
             detail = err_text.splitlines()[-1] if err_text else f"退出码 {proc.returncode}"
             raise MediaExtractionError(f"FFmpeg 提取音频失败: {detail}")
 
-        if not output_path.is_file() or output_path.stat().st_size == 0:
-            raise MediaExtractionError("FFmpeg 未生成有效音频（视频可能不包含音轨）")
+    if not output_path.is_file() or output_path.stat().st_size == 0:
+        raise MediaExtractionError("FFmpeg 未生成有效音频（视频可能不包含音轨）")
 
-        return output_path
-    finally:
-        if proc.stderr:
-            proc.stderr.close()
+    return output_path
+
+
+def _stop_process(proc: subprocess.Popen) -> None:
+    proc.terminate()
+    try:
+        proc.wait(timeout=3)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+
+
+def _read_tail(fh: IO[bytes], max_bytes: int = 8192) -> bytes:
+    """Read at most the last max_bytes of a file (only the final error line is shown)."""
+    fh.seek(0, os.SEEK_END)
+    size = fh.tell()
+    fh.seek(max(0, size - max_bytes))
+    return fh.read()

@@ -453,13 +453,20 @@ class SubtitleBatchApp:
         )
 
         def worker() -> None:
-            processor = BatchProcessor(options)
+            results: list[FileResult] = []
+            error: str | None = None
 
             def on_progress(idx: int, status: FileStatus, message: str, out: Path | None) -> None:
                 self._event_queue.put(("progress", idx, status, message, out))
 
-            results = processor.run(files, cancel_event=self._cancel_event, on_progress=on_progress)
-            self._event_queue.put(("finished", results))
+            try:
+                processor = BatchProcessor(options)
+                results = processor.run(files, cancel_event=self._cancel_event, on_progress=on_progress)
+            except Exception as exc:
+                error = str(exc).strip() or exc.__class__.__name__
+            finally:
+                # Always notify the UI, otherwise the controls stay disabled forever.
+                self._event_queue.put(("finished", results, error))
 
         self._worker_thread = threading.Thread(target=worker, daemon=True)
         self._worker_thread.start()
@@ -484,6 +491,16 @@ class SubtitleBatchApp:
         finished = sum(1 for i in self.items if i.status in terminal)
         self.progress_var.set((finished / total) * 100.0)
         self.summary_var.set(f"进度 {finished}/{total} | 成功 {done} | 跳过 {skipped} | 失败 {failed}")
+
+    def _mark_unfinished_failed(self, message: str) -> None:
+        terminal = {FileStatus.DONE, FileStatus.SKIPPED, FileStatus.FAILED, FileStatus.CANCELLED}
+        for item, iid in zip(self.items, self.item_iids):
+            if item.status in terminal:
+                continue
+            item.status = FileStatus.FAILED
+            item.detail = message
+            self.tree.set(iid, "status", FileStatus.FAILED.value)
+            self.tree.set(iid, "detail", message)
 
     def _append_log(self, text: str) -> None:
         self.log_text.configure(state=tk.NORMAL)
@@ -513,9 +530,15 @@ class SubtitleBatchApp:
                             self._append_log(f"[完成] {item.source.name} -> {message}")
                         self._update_summary()
                 elif kind == "finished":
-                    results: list[FileResult] = event[1]
+                    _, results, error = event
+                    if error is not None:
+                        self._mark_unfinished_failed(f"任务中止: {error}")
                     self._set_controls_state(False)
                     self._update_summary()
+                    if error is not None:
+                        self._append_log(f"[错误] 批量任务异常终止：{error}")
+                        messagebox.showerror("批量任务异常终止", error)
+                        continue
                     done = sum(1 for r in results if r.status == FileStatus.DONE)
                     skipped = sum(1 for r in results if r.status == FileStatus.SKIPPED)
                     failed = sum(1 for r in results if r.status == FileStatus.FAILED)

@@ -52,6 +52,16 @@ def _build_transcribe_params(kwargs: dict[str, Any]) -> dict[str, Any]:
     return params
 
 
+def _response_to_dict(response: Any) -> dict:
+    """Dump an SDK response model to a plain dict, dropping unset (None) fields.
+
+    deepgram-captions decides whether to emit speaker labels by checking for the
+    presence of a "speaker" key, so a plain model_dump() (which keeps
+    "speaker": None when diarize is off) would produce "<v Speaker None>" cues.
+    """
+    return response.model_dump(exclude_none=True)
+
+
 def transcribe_file(client: DeepgramClient, file_path: str | Path, **kwargs: Any) -> dict:
     """Transcribe a local audio/video file and return the raw response dict.
 
@@ -64,7 +74,7 @@ def transcribe_file(client: DeepgramClient, file_path: str | Path, **kwargs: Any
         request=audio_bytes,
         **params,
     )
-    return response.model_dump()
+    return _response_to_dict(response)
 
 
 def transcribe_url(client: DeepgramClient, url: str, **kwargs: Any) -> dict:
@@ -74,7 +84,7 @@ def transcribe_url(client: DeepgramClient, url: str, **kwargs: Any) -> dict:
         url=url,
         **params,
     )
-    return response.model_dump()
+    return _response_to_dict(response)
 
 
 def generate_captions(

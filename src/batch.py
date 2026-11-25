@@ -76,19 +76,24 @@ def build_output_paths(
     fmt: str,
     output_dir: Path | None = None,
 ) -> list[Path]:
-    """Compute target subtitle paths, avoiding filename collisions when using a shared output_dir."""
-    if output_dir is None:
-        return [f.with_suffix(f".{fmt}") for f in files]
+    """Compute target subtitle paths, guaranteeing that no two files share a target.
 
+    Collisions can happen both with a shared output_dir (same stem in different
+    folders) and next to the sources (e.g. "a.mp4" and "a.mkv" in one folder).
+    The first file keeps the plain name; later ones get "_2", "_3", ... suffixes.
+    Comparison is case-insensitive to stay safe on Windows/macOS filesystems.
+    """
     results: list[Path] = []
-    used: dict[str, int] = {}
+    used: set[str] = set()
     for f in files:
-        base_stem = f.stem
-        key = base_stem.lower()
-        count = used.get(key, 0)
-        used[key] = count + 1
-        final_stem = base_stem if count == 0 else f"{base_stem}_{count + 1}"
-        results.append(output_dir / f"{final_stem}.{fmt}")
+        directory = output_dir if output_dir is not None else f.parent
+        candidate = directory / f"{f.stem}.{fmt}"
+        n = 2
+        while str(candidate).lower() in used:
+            candidate = directory / f"{f.stem}_{n}.{fmt}"
+            n += 1
+        used.add(str(candidate).lower())
+        results.append(candidate)
     return results
 
 
